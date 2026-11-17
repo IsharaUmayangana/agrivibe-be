@@ -3,7 +3,7 @@ from typing import Annotated
 
 from agrivibe.models.ask import AskRequest, AskResponse
 from agrivibe.service.answering import AnswerService
-from agrivibe.dependancies import get_answer_service
+from agrivibe.dependencies import get_answer_service
 
 router = APIRouter(tags=["Agents"])
 
