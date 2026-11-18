@@ -1,14 +1,15 @@
-from fastapi import APIRouter, Depends, HTTPException
 from typing import Annotated
 
+from fastapi import APIRouter, Depends
+
+from agrivibe.dependencies import get_answer_service
 from agrivibe.models.ask import AskRequest, AskResponse
 from agrivibe.service.answering import AnswerService
-from agrivibe.dependencies import get_answer_service
 
-router = APIRouter(tags=["Agents"])
+router = APIRouter(tags=["agents"])
 
-Service = Annotated[AnswerService, Depends(get_answer_service)]
 
 @router.post("/ask")
-def ask(request: AskRequest, service: Service) -> AskResponse:
-    return service.ask(request.question)
+def ask(request: AskRequest, service: Annotated[AnswerService, Depends(get_answer_service)]) -> AskResponse:
+    """Ask the RAG agent. Returns the answer as sentence and citation pairs."""
+    return service.ask(request.question, request.thread_id)

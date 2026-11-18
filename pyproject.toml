@@ -1,7 +1,7 @@
 [project]
 name = "agrivibe"
 version = "0.1.0"
-description = "Add your description here"
+description = "FieldOracle: the AgriVibe knowledge service. Index PDFs, ask a RAG agent for cited answers."
 readme = "README.md"
 authors = [
     { name = "Ishara Umayangana", email = "isharaumayangana27@gmail.com" }

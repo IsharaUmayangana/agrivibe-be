@@ -1,123 +1,117 @@
-"""Stand-ins for OpenAI, Pinecone and FieldSat, so the tests run offline and for free."""
+from langchain_core.messages import AIMessage, HumanMessage
+from langgraph.checkpoint.memory import InMemorySaver
 
-import warnings
-
-from fastmcp import FastMCP
-from fastmcp.exceptions import ToolError
-from langchain_core.embeddings import DeterministicFakeEmbedding
-from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import AIMessage
-from langchain_core.outputs import ChatGeneration, ChatResult
-from langchain_core.vectorstores import InMemoryVectorStore
-from pydantic import Field
-
-with warnings.catch_warnings():
-    warnings.simplefilter("ignore")
-    from langchain.mcp import MCPAdapter
+from agrivibe.agents.fieldoracle import build_fieldoracle_agent
+from agrivibe.dependencies import get_answer_service
+from agrivibe.main import app
+from agrivibe.service.answering import NOT_FOUND, AnswerService
+from tests.conftest import upload
+from tests.fakes import FakeReranker, ScriptedChatModel
 
 
-class FakeVectorStore(InMemoryVectorStore):
-    """In-memory store that accepts Pinecone-style {"key": value} filters."""
-
-    def __init__(self):
-        super().__init__(DeterministicFakeEmbedding(size=64))
-
-    def similarity_search_with_score(self, query, k=4, filter=None, **kwargs):
-        if isinstance(filter, dict):
-            wanted = filter
-
-            def matches(doc):
-                return all(doc.metadata.get(key) == value for key, value in wanted.items())
-
-            filter = matches
-
-        return super().similarity_search_with_score(query, k=k, filter=filter, **kwargs)
+def search_call(query, category=None):
+    return AIMessage(content="", tool_calls=[{"name": "search_knowledge", "args": {"query": query, "category": category}, "id": query}])
 
 
-class ScriptedChatModel(BaseChatModel):
-    """Replies with a fixed list of messages, one per call. Tool calls included."""
-
-    replies: list[AIMessage]
-    calls: int = 0
-    received: list = Field(default_factory=list)  # the messages sent on each call, for tests to read
-
-    @property
-    def _llm_type(self) -> str:
-        return "scripted"
-
-    def bind_tools(self, tools, **kwargs):
-        return self
-
-    def _generate(self, messages, stop=None, run_manager=None, **kwargs):
-        self.received.append(messages)
-        reply = self.replies[self.calls]
-        self.calls += 1
-        return ChatResult(generations=[ChatGeneration(message=reply)])
+def answer_call(found, sentences):
+    return AIMessage(content="", tool_calls=[{"name": "CitedAnswer", "args": {"found": found, "sentences": sentences}, "id": "final"}])
 
 
-class FakeReranker:
-    """Stands in for the cross-encoder. A chunk scores one point per query word it contains."""
-
-    kind = "fake"
-
-    def __init__(self, candidates=20):
-        self.candidates = candidates
-        self.calls = 0
-
-    def score(self, query, docs):
-        self.calls += 1
-        words = set(query.lower().split())
-        return [float(sum(word in doc.page_content.lower() for word in words)) for doc in docs]
+def use_agent(vector_store, replies, k=10, reranker=None):
+    """Run the real agent graph, with a scripted model in place of OpenAI."""
+    agent = build_fieldoracle_agent(
+        ScriptedChatModel(replies=replies), vector_store, k=k, checkpointer=InMemorySaver(), reranker=reranker
+    )
+    service = AnswerService(agent)
+    app.dependency_overrides[get_answer_service] = lambda: service
+    return agent
 
 
-def fake_fieldsat() -> FastMCP:
-    """A stand-in for the FieldSat MCP server: the same three tools, fixed numbers.
+def test_ask_returns_cited_sentences(client, vector_store):
+    upload(client, "fertiliser_subsidy_circular_2026.pdf", "policy")
+    first, second = list(vector_store.store)[:2]
+    use_agent(vector_store, [
+        search_call("subsidy claim deadline", "policy"),
+        answer_call(True, [
+            {"sentence": "Claims close on 15 November 2026.", "citations": [first, second]},
+            {"sentence": "Apply at the Agrarian Service Centre.", "citations": [second]},
+        ]),
+    ])
 
-    MCPAdapter connects to it in memory, so tests need no server process. The numbers
-    are FieldSat's demo values for the Minneriya field.
-    """
-    mcp = FastMCP("FieldSat (test)")
+    body = client.post("/ask", json={"question": "When do subsidy claims close?"}).json()
 
-    @mcp.tool
-    def list_fields() -> dict:
-        """List every field this server can analyse."""
-        return {"fields": [{"id": "SL-PADDY-MINNERIYA", "name": "Minneriya Paddy Fields", "crop": "paddy"}]}
-
-    @mcp.tool
-    def get_satellite_analysis(field_id: str, comparison_days: int) -> dict:
-        """Sentinel-2 vegetation change (NDVI) and data quality for one registered field."""
-        return {
-            "field_id": field_id,
-            "current_mean_ndvi": 0.56,
-            "previous_mean_ndvi": 0.66,
-            "ndvi_change_percentage": -15.2,
-            "trend": "significant_decline",
-            "ndvi_standard_deviation": 0.17,
-            "field_uniformity": "uneven",
-            "valid_observations": 4,
-            "average_cloud_coverage_percentage": 11.0,
-            "data_quality": "good",
-        }
-
-    @mcp.tool
-    def get_weather_context(field_id: str) -> dict:
-        """Recent rainfall and the 48-hour rain forecast for one registered field."""
-        if field_id == "SL-PADDY-WEATHER-FAIL":  # FieldSat's demo field whose weather source is down
-            raise ToolError("The weather source is unavailable.")
-        return {
-            "rainfall_last_7_days_mm": 112.0,
-            "rainy_days_last_7_days": 5,
-            "rainfall_last_48_hours_mm": 38.0,
-            "rainfall_forecast_next_48_hours_mm": 46.0,
-            "average_humidity_last_7_days": 88.0,
-            "heavy_rain_recent": True,
-            "heavy_rain_expected": True,
-        }
-
-    return mcp
+    assert body["found"] is True
+    assert body["answer"] == (
+        f"Claims close on 15 November 2026. [{first}, {second}] Apply at the Agrarian Service Centre. [{second}]"
+    )
+    assert body["searches"] == ["subsidy claim deadline"]
+    assert {source["id"] for source in body["sources"]} == {first, second}
 
 
-async def load_fake_fieldsat_tools() -> list:
-    """The fake server's tools, exactly as MCPAdapter hands them to an agent."""
-    async with MCPAdapter(fake_fieldsat()) as adapter:
-        return await adapter.list_tools()
+def test_ask_not_found(client, vector_store):
+    upload(client, "paddy_cultivation_guide.pdf", "cultivation_guide")
+    use_agent(vector_store, [search_call("tea pruning cycle"), answer_call(False, [])])
+
+    body = client.post("/ask", json={"question": "How often should I prune tea?"}).json()
+
+    assert body["found"] is False
+    assert body["answer"] == NOT_FOUND
+    assert body["sources"] == []
+
+
+def test_follow_up_continues_the_thread(client, vector_store):
+    upload(client, "fertiliser_subsidy_circular_2026.pdf", "policy")
+    first, second = list(vector_store.store)[:2]
+    agent = use_agent(vector_store, [
+        search_call("subsidy claim deadline", "policy"),
+        answer_call(True, [{"sentence": "Claims close on 15 November 2026.", "citations": [first]}]),
+        search_call("where to apply for subsidy", "policy"),
+        answer_call(True, [{"sentence": "Apply at the Agrarian Service Centre.", "citations": [second]}]),
+    ])
+
+    opening = client.post("/ask", json={"question": "When do subsidy claims close?"}).json()
+    follow_up = client.post("/ask", json={"question": "Where do I apply?", "thread_id": opening["thread_id"]}).json()
+
+    assert follow_up["thread_id"] == opening["thread_id"]
+    assert follow_up["searches"] == ["where to apply for subsidy"]
+    assert {source["id"] for source in follow_up["sources"]} == {second}
+    history = agent.get_state({"configurable": {"thread_id": opening["thread_id"]}}).values["messages"]
+    assert [m.content for m in history if isinstance(m, HumanMessage)] == ["When do subsidy claims close?", "Where do I apply?"]
+
+
+def test_new_question_starts_a_new_thread(client, vector_store):
+    use_agent(vector_store, [
+        search_call("tea pruning cycle"), answer_call(False, []),
+        search_call("tea pruning cycle"), answer_call(False, []),
+    ])
+
+    one = client.post("/ask", json={"question": "How often should I prune tea?"}).json()
+    two = client.post("/ask", json={"question": "How often should I prune tea?"}).json()
+
+    assert one["thread_id"] != two["thread_id"]
+
+
+def test_reranked_citations_point_to_retrieved_record_ids(client, vector_store):
+    upload(client, "paddy_cultivation_guide.pdf", "cultivation_guide")
+    upload(client, "fertiliser_subsidy_circular_2026.pdf", "policy")
+    reranker = FakeReranker()
+    # The same two-stage search the tool runs, to know which record ids it will return.
+    candidates = [doc for doc, _score in vector_store.similarity_search_with_score("subsidy claim deadline", k=20)]
+    scores = dict(zip([doc.id for doc in candidates], reranker.score("subsidy claim deadline", candidates)))
+    top = sorted(scores, key=lambda record_id: scores[record_id], reverse=True)[:2]
+    agent = use_agent(vector_store, [
+        search_call("subsidy claim deadline"),
+        answer_call(True, [{"sentence": "Claims close on 15 November 2026.", "citations": top}]),
+    ], k=2, reranker=reranker)
+
+    body = client.post("/ask", json={"question": "When do subsidy claims close?"}).json()
+
+    tool_message = next(
+        m for m in agent.get_state({"configurable": {"thread_id": body["thread_id"]}}).values["messages"]
+        if m.type == "tool"
+    )
+    # The model reads passages headed by record ids, best rerank score first.
+    assert tool_message.content.index(f"[{top[0]}]") < tool_message.content.index(f"[{top[1]}]")
+    # Sources come from the tool's artifact, so they keep its reranked order and carry the rerank score.
+    assert [source["id"] for source in body["sources"]] == top
+    assert [source["rerank_score"] for source in body["sources"]] == [scores[i] for i in top]
