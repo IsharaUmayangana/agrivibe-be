@@ -1,5 +1,4 @@
 # AgriVibe backend
-# AgriVibe backend
 
 The backend behind AgriVibe, an advisory app for farmers in Sri Lanka. It is a FastAPI app
 built across the STEMLink AI Engineer Bootcamp. The code is kept small on purpose, but the
@@ -9,19 +8,7 @@ It started in Level 4 as FieldOracle, the knowledge service. You upload PDFs (cu
 guides, government circulars, farm records) and FieldOracle splits them, embeds them and
 stores them in Pinecone. You ask a question and a RAG agent searches that store and answers
 with a citation after every sentence, so every sentence traces back to passages in a PDF.
-The backend behind AgriVibe, an advisory app for farmers in Sri Lanka. It is a FastAPI app
-built across the STEMLink AI Engineer Bootcamp. The code is kept small on purpose, but the
-layout is the one you would use at work.
 
-It started in Level 4 as FieldOracle, the knowledge service. You upload PDFs (cultivation
-guides, government circulars, farm records) and FieldOracle splits them, embeds them and
-stores them in Pinecone. You ask a question and a RAG agent searches that store and answers
-with a citation after every sentence, so every sentence traces back to passages in a PDF.
-
-In Level 6 it becomes a multi-agent backend. The farmer talks to an orchestrator, which
-calls specialist agents as tools: FieldOracle for knowledge, a Weather Agent and a Farm
-Context Agent that read field evidence from the FieldSat MCP server, and an Advisory Agent
-that turns their evidence into one recommendation.
 In Level 6 it becomes a multi-agent backend. The farmer talks to an orchestrator, which
 calls specialist agents as tools: FieldOracle for knowledge, a Weather Agent and a Farm
 Context Agent that read field evidence from the FieldSat MCP server, and an Advisory Agent
@@ -175,7 +162,6 @@ Your output will differ in wording. The shape is fixed:
 | POST | `/search` | `{"query", "category"?, "k"?, "rerank"?}` | `SearchResponse` |
 | POST | `/ask` | `{"question", "thread_id"?}` | `AskResponse` |
 | POST | `/chat` | `{"message", "user_id", "thread_id"?}` | `ChatResponse` |
-| POST | `/chat` | `{"message", "user_id", "thread_id"?}` | `ChatResponse` |
 
 The request and response models are in `src/agrivibe/models/`, one module per router. That
 package is the contract a frontend codes against.
@@ -191,27 +177,18 @@ src/agrivibe/
 │   ├── knowledge.py   IndexResponse, SearchRequest, SearchResponse, Source
 │   ├── ask.py         AskRequest, AskResponse
 │   └── chat.py        ChatRequest, ChatResponse
-│   ├── ask.py         AskRequest, AskResponse
-│   └── chat.py        ChatRequest, ChatResponse
 ├── api/               HTTP layer: routes only, no logic
 │   ├── knowledge.py   POST /documents, POST /search
-│   ├── ask.py         POST /ask
-│   └── chat.py        POST /chat
 │   ├── ask.py         POST /ask
 │   └── chat.py        POST /chat
 ├── service/           one class per use case
 │   ├── knowledge.py   read PDF, split, tag, upsert; search
 │   ├── answering.py   invoke the RAG agent, format the cited answer, collect sources
 │   └── chatting.py    invoke the orchestrator, report the tools it called
-│   ├── answering.py   invoke the RAG agent, format the cited answer, collect sources
-│   └── chatting.py    invoke the orchestrator, report the tools it called
 ├── agents/            agent layer: knows nothing about HTTP
 │   ├── fieldoracle/   the RAG agent: tool, prompt, output schema
 │   ├── fieldsat.py    what the FieldSat agents share: FieldContext, FieldReport, FieldSatReport
 │   ├── weather/       rain for one field, from FieldSat
-│   ├── farm_context/  satellite field health for one field, from FieldSat
-│   ├── advisory/      one recommendation from the other agents' findings
-│   └── orchestrator/  talks to the farmer, calls the specialists as tools, owns central memory
 │   ├── farm_context/  satellite field health for one field, from FieldSat
 │   ├── advisory/      one recommendation from the other agents' findings
 │   └── orchestrator/  talks to the farmer, calls the specialists as tools, owns central memory
@@ -593,12 +570,6 @@ pasted into one agent's prompt. FieldOracle replaces that with retrieval:
 - `searches` render as live tool chips, the same way satellite and weather calls show today.
 - Add the frontend's URL to `CORS_ORIGINS` if the browser calls FieldOracle directly.
 
-For the multi-agent chat, call `POST /chat` instead:
-
-- Send the signed-in farmer's id as `user_id`, and keep `thread_id` per chat.
-- `tools_called` render as live chips: one per specialist the orchestrator asked.
-- `findings` render as the evidence panel, one card per specialist: the `summary` as text,
-  and `data` for the numbers and badges (rain in mm, NDVI change, data quality).
 For the multi-agent chat, call `POST /chat` instead:
 
 - Send the signed-in farmer's id as `user_id`, and keep `thread_id` per chat.
